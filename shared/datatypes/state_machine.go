@@ -178,21 +178,25 @@ func (sm *StateMachine) GetDBConn() *sqlx.DB {
 // returns the next response of the stateMachine, whether that's the Complete()
 // failed string or the OnEntry() string.
 func (sm *StateMachine) Next(in *Msg) (response string) {
-	h := sm.Handlers[sm.state]
 	if sm.state >= len(sm.Handlers) {
-		sm.logger.Debug("state is >= len(handlers)")
+		sm.logger.Debug("finished states, nothing to do")
 		return ""
 	}
+
+	h := sm.Handlers[sm.state]
 	if !sm.stateEntered {
+		sm.setEntered(in)
 		if h.SkipIfComplete {
+			h.OnInput(in)
 			done, _ := h.Complete(in)
 			if done {
 				sm.logger.Debug("state was complete. moving on")
-		                sm.state++
+				sm.incrementState(in)
+
 				return sm.Next(in)
 			}
 		}
-		sm.setEntered(in)
+
 		sm.logger.Debug("setting state entered")
 		return h.OnEntry(in)
 	}
@@ -202,19 +206,9 @@ func (sm *StateMachine) Next(in *Msg) (response string) {
 	done, str := h.Complete(in)
 	if done {
 		sm.logger.Debug("state is done. going to next")
-		if sm.state+1 >= len(sm.Handlers) {
-			sm.logger.Debug("finished states, nothing to do")
-			return ""
-		}
-		q := `UPDATE states SET value=$1 WHERE key=$2`
-		b := make([]byte, 8) // space for int64
-		binary.LittleEndian.PutUint64(b, uint64(sm.state))
-		if _, err := sm.db.Exec(q, b, stateKey); err != nil {
-			sm.logger.Debug("could not update state", err)
-		}
-		sm.state++
-		sm.setEntered(in)
-		return sm.Handlers[sm.state].OnEntry(in)
+		sm.incrementState(in)
+
+		return sm.Next(in)
 	} else if len(str) > 0 {
 		sm.logger.Debug("incomplete with message")
 		return str
@@ -223,12 +217,30 @@ func (sm *StateMachine) Next(in *Msg) (response string) {
 	return ""
 }
 
+func (sm *StateMachine) incrementState(in *Msg) {
+	sm.state++
+
+	q := `UPDATE states SET value=$1 WHERE key=$2`
+	b := make([]byte, 8) // space for int64
+	binary.LittleEndian.PutUint64(b, uint64(sm.state))
+	if _, err := sm.db.Exec(q, b, stateKey); err != nil {
+		sm.logger.Debug("could not update state", err)
+	}
+
+	sm.clearEntered(in)
+}
+
 // setEntered is used internally to set a state as having been entered both in
 // memory and persisted to the database. This ensures that a stateMachine does
 // not run a state's OnEntry function twice.
 func (sm *StateMachine) setEntered(in *Msg) {
 	sm.stateEntered = true
 	sm.SetMemory(in, stateEnteredKey, true)
+}
+
+func (sm *StateMachine) clearEntered(in *Msg) {
+	sm.stateEntered = false
+	sm.SetMemory(in, stateEnteredKey, false)
 }
 
 // OnInput runs the stateMachine's current OnInput function. Most of the time
